@@ -1,0 +1,255 @@
+// Copyright 2026 BitWise Media Group Ltd
+// SPDX-License-Identifier: MIT
+
+// Shared org preset — every repo the Renovate App is installed on inherits this via the
+// bot's global config (`extends: ["github>the-marmack/renovate-config:default.json5"]`),
+// so no per-repo onboarding file is needed. A repo overrides or extends it with its own
+// `.github/renovate.json5`. The `:default.json5` filename must ALWAYS be spelled out:
+// Renovate only auto-discovers `default.json` for a bare github>owner/repo reference
+// (deliberately, to avoid try/fail API calls — renovate#36877); the explicit name is the
+// price of keeping these comments.
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  extends: [
+    "config:recommended",
+    // Dockerfile `ARG *_VERSION` bumps via `# renovate: datasource=… depName=…` comments
+    "customManagers:dockerfileVersions",
+  ],
+  timezone: "Etc/UTC",
+  schedule: ["at any time"], // cadence is the bot workflow's cron, not repo config
+  semanticCommits: "enabled",
+  // chore(deps) default: dev-toolchain bumps (mise.lock, the .mise submodule) don't cut a
+  // release. github-actions bumps override to fix(deps) below — those pins ship to
+  // consumers. Repos where mise tools affect the shipped product override per-repo.
+  semanticCommitType: "chore",
+  semanticCommitScope: "deps",
+  // every Renovate PR carries `dependencies`; ecosystem labels are layered on via
+  // addLabels packageRules below. Renovate never CREATES labels on GitHub — it only
+  // applies ones that already exist — which is safe org-wide because these are synced
+  // to every repo from github-settings/repo-config/labels.json.
+  labels: ["dependencies"],
+  // merge behind-base PRs without a rebase (no rebase queue); rebase only on conflict
+  rebaseWhen: "conflicted",
+  // Renovate itself squash-merges via the API on a later run once every check is green —
+  // GitHub-native automerge cannot work here (it can't satisfy the approval rule, and the
+  // ruleset's rebase merge method would land unsigned commits). The App is a bypass actor
+  // on the pull-request ruleset, and the server-side squash commit is web-flow signed.
+  platformAutomerge: false,
+  automergeType: "pr",
+  automergeStrategy: "squash",
+  // release cooldown — raises the `renovate/stability-days` pending check (was 7 days
+  // under dependabot; lowered to 3 org-wide)
+  minimumReleaseAge: "3 days",
+  prConcurrentLimit: 10,
+  prHourlyLimit: 0,
+  // re-lists config:recommended's defaults (overriding replaces, not merges), plus: never
+  // scan the toolchain submodule's contents — it is cloned only so `mise lock` can resolve
+  // the task include (see cloneSubmodules in renovate-global.json5)
+  ignorePaths: ["**/node_modules/**", "**/bower_components/**", ".mise/**"],
+  // toolchain submodule pointer bumps; .gitmodules `branch` carries the semver tag
+  // (vX.Y.Z), so updates classify as major/minor/patch and the automerge rule applies
+  "git-submodules": { enabled: true },
+  // mise tools pin exact versions in config (the toolchain model): the mise manager
+  // bumps the pin and its artifact step regenerates mise.lock (`mise lock`,
+  // allowedUnsafeExecutions bot-side) in the same PR, under the normal
+  // minimumReleaseAge cooldown above.
+  //
+  // TRANSITIONAL — remove once every repo is on exact pins: repos whose tools still
+  // float on "latest" selectors get their mise.lock refreshed via `mise lock --bump`
+  // here (exact-pin repos produce no lock-maintenance diff, so this is inert for
+  // them). minimumReleaseAge must be null: a lock refresh is a synthetic update with
+  // no releaseTimestamp, and Renovate's default minimumReleaseAgeBehaviour
+  // (timestamp-required) would leave renovate/stability-days pending forever,
+  // deadlocking the automerge. mise's own MISE_MINIMUM_RELEASE_AGE cooldown is the
+  // guard by decision.
+  lockFileMaintenance: {
+    enabled: true,
+    schedule: ["at any time"],
+    automerge: true,
+    minimumReleaseAge: null,
+  },
+  // run `go mod tidy` after gomod bumps so go.mod/go.sum stay pruned, not just updated
+  postUpdateOptions: ["gomodTidy"],
+  customManagers: [
+    // Dockerfile GitHub-release-asset pins: bump a release tag AND the sha256 of one of
+    // its assets in lockstep (customManagers:dockerfileVersions above bumps only the
+    // version ARG, silently stranding any checksum pinned next to it). Convention — one
+    // annotated pair per asset, so multi-arch pins are one block per arch:
+    //
+    //   # renovate: datasource=github-release-attachments depName=openai/codex versioning=regex:^rust-v(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)$
+    //   ARG CODEX_AMD64_RELEASE=rust-v0.147.0
+    //   ARG CODEX_AMD64_SHA256=0246e2e…
+    //
+    // Renovate resolves the new digest by finding which asset of the CURRENT release
+    // hashes to the pinned sha256, then hashing the same-named asset of the NEW release
+    // (github-release-attachments getDigest). Two hard constraints follow:
+    //  - the pinned value must be the FULL git tag (the datasource resolves digests via
+    //    `releases/tags/<currentValue>`), so `extractVersion` must NOT be used — carry a
+    //    tag prefix with `versioning=regex:…` instead, as above;
+    //  - `_RELEASE` (not `_VERSION`) keeps these blocks out of the dockerfileVersions
+    //    preset's regex, which would otherwise double-match and fight over the line.
+    // Blocks sharing a depName+tag land in the same branch, so all arches bump together.
+    {
+      customType: "regex",
+      description: "Update Dockerfile `ARG *_RELEASE` github tags together with their pinned `ARG *_SHA256*` release-asset checksums",
+      managerFilePatterns: [
+        "**/[Dd]ockerfile*",
+        "**/[Cc]ontainerfile*",
+        "**/*.[Dd]ockerfile*",
+        "**/*.[Cc]ontainerfile*",
+      ],
+      matchStrings: [
+        "# renovate: datasource=(?<datasource>[a-zA-Z0-9-._]+?) depName=(?<depName>[^\\s]+?)(?: (?:lookupName|packageName)=(?<packageName>[^\\s]+?))?(?: versioning=(?<versioning>[^\\s]+?))?(?: registryUrl=(?<registryUrl>[^\\s]+?))?\\s(?:ENV|ARG)\\s+[A-Za-z0-9_]+?_RELEASE[ =][\"']?(?<currentValue>[^\\s\"']+?)[\"']?\\s+(?:ENV|ARG)\\s+[A-Za-z0-9_]+?_SHA256(?:_[A-Za-z0-9]+?)?[ =][\"']?(?<currentDigest>[a-fA-F0-9]{64})[\"']?\\s",
+      ],
+    },
+  ],
+  packageRules: [
+    // actions pins ship to consumers of the reusable workflows → fix(deps) patch release
+    { matchManagers: ["github-actions"], semanticCommitType: "fix" },
+    // Terraform compound constraints (">= 5.0, < 6.0") lose their lower bound under
+    // Renovate's default range handling — a major bump rewrites this to "< 6.61"
+    // instead of ">= 5.0, < 6.61", silently permitting versions the constraint was
+    // meant to exclude. widen is the confirmed fix (renovatebot/renovate#13491).
+    { matchManagers: ["terraform"], rangeStrategy: "widen" },
+    // terraform-docs embeds the provider/module version constraints into the READMEs and
+    // the module repos' lint task checks them (`terraform-docs --output-check`), so a
+    // constraint bump alone leaves CI red on a stale README. Regenerate the docs in the
+    // same PR (`mise run docs` — the repos' stable docs task; changed files are committed
+    // by default). Scoped to the terraform-* module repos: deployment roots
+    // (cloud-accounts) have no .terraform-docs.yml, so the archetype docs task would fail
+    // there. The command must stay allowlisted in renovate-global.json5 allowedCommands.
+    {
+      matchManagers: ["terraform"],
+      matchRepositories: ["the-marmack/terraform-*"],
+      postUpgradeTasks: {
+        commands: ["mise run docs"],
+        // once per branch after all updates land, not once per dependency
+        executionMode: "branch",
+      },
+    },
+    // Dependabot-equivalent groups, restricted to stable minor/patch so a major or 0.x
+    // falls out as its own PR and never blocks the group's automerge.
+    {
+      matchManagers: ["github-actions"],
+      matchUpdateTypes: ["minor", "patch"],
+      matchCurrentVersion: "!/^0/",
+      matchPackageNames: ["actions/**"],
+      groupName: "actions",
+    },
+    {
+      matchManagers: ["github-actions"],
+      matchUpdateTypes: ["minor", "patch"],
+      matchCurrentVersion: "!/^0/",
+      matchPackageNames: ["github/**"],
+      groupName: "github",
+    },
+    {
+      matchManagers: ["github-actions"],
+      matchUpdateTypes: ["minor", "patch"],
+      matchCurrentVersion: "!/^0/",
+      matchPackageNames: ["the-marmack/**"],
+      groupName: "the-marmack",
+    },
+    {
+      matchManagers: ["github-actions"],
+      matchUpdateTypes: ["minor", "patch"],
+      matchCurrentVersion: "!/^0/",
+      matchPackageNames: ["codecov/**"],
+      groupName: "codecov",
+    },
+    {
+      matchManagers: ["github-actions"],
+      matchUpdateTypes: ["minor", "patch"],
+      matchCurrentVersion: "!/^0/",
+      matchPackageNames: ["google/**", "googleapis/**"],
+      groupName: "google",
+    },
+    {
+      matchManagers: ["github-actions"],
+      matchUpdateTypes: ["minor", "patch"],
+      matchCurrentVersion: "!/^0/",
+      matchPackageNames: ["goreleaser/**"],
+      groupName: "goreleaser",
+    },
+    // our own releases ship straight through — no cooldown (actions, the toolchain
+    // submodule AND our ghcr.io images). matchPackageNames globs match the WHOLE
+    // packageName, and each manager names ours differently: github-actions uses the
+    // bare `owner/repo`, git-submodules the full clone URL from .gitmodules, docker the
+    // registry-prefixed image. The bare glob alone silently missed the submodule, and
+    // since the git-refs datasource has no release timestamps at all, the toolchain
+    // bump sat in "Pending Status Checks" forever under timestamp-required
+    // (dotty/patchy: .mise v2.4.0 → v2.4.2 never got a PR).
+    {
+      matchPackageNames: [
+        "the-marmack/**",
+        "https://github.com/the-marmack/**",
+        "ghcr.io/the-marmack/**",
+      ],
+      minimumReleaseAge: null,
+    },
+    // default automerge policy: stable (>=1.0.0) minor/patch; majors + 0.x wait for a
+    // human review (the auto-merge label rules below hand the post-approval merge to
+    // the merge workflow). The 0.x test must also catch prefixed release tags
+    // ("v0.5.0", "rust-v0.147.0") — matchCurrentVersion regexes run against the raw
+    // version string, and the release-asset custom manager above pins full tags, so a
+    // bare `!/^0/` would wave 0.x tags through as stable.
+    {
+      matchUpdateTypes: ["minor", "patch"],
+      matchCurrentVersion: "!/(^|[-v])0(\\.|$)/",
+      automerge: true,
+    },
+    // digest-only bumps (go module pseudo-versions, SHA-pinned release assets) carry
+    // no semver signal for a human to review — automerge unattended like a patch
+    { matchUpdateTypes: ["digest"], automerge: true },
+    // docker digest bumps: the docker datasource only yields release timestamps for
+    // Docker Hub (`tag_last_pushed`); gcr.io / ghcr.io / cgr.dev images get none, and
+    // reproducible builds (distroless) even stamp the image config `created` with the
+    // epoch, which Renovate rejects. Under the default minimumReleaseAgeBehaviour
+    // (timestamp-required) a timestamp-less update is pending forever — the
+    // renovate/stability-days check never clears, rebases are refused, automerge
+    // deadlocks (patchy#260). timestamp-optional lets those through while keeping the
+    // cooldown wherever a real timestamp exists.
+    {
+      matchDatasources: ["docker"],
+      matchUpdateTypes: ["digest"],
+      minimumReleaseAgeBehaviour: "timestamp-optional",
+    },
+    // mise-managed tools are the exception to the 0.x carve-out: many live on perpetual
+    // 0.x (grype, syft, …) where minors are routine releases, so their minor/patch bumps
+    // automerge too — majors still wait for a human
+    {
+      matchManagers: ["mise"],
+      matchCurrentVersion: "/^0/",
+      matchUpdateTypes: ["minor", "patch"],
+      automerge: true,
+    },
+    // human-gated updates (majors, non-mise 0.x) deliberately do NOT set automerge —
+    // Renovate is a bypass actor on the pull-request ruleset, so its own automerge
+    // would land them without review. Instead the auto-merge label arms the merge
+    // workflow (github-workflows merge.yaml): once a human approves and every check is
+    // green, ff-merge squash-merges the PR on our behalf — Renovate branches are never
+    // fast-forwardable (rebaseWhen: conflicted), so ff-merge's squash-authors path
+    // does an API squash, web-flow signed, no rebase queue, no manual merge.
+    { matchUpdateTypes: ["major"], addLabels: ["auto-merge"] },
+    {
+      matchManagers: ["!mise"],
+      matchUpdateTypes: ["minor", "patch"],
+      matchCurrentVersion: "/(^|[-v])0(\\.|$)/",
+      addLabels: ["auto-merge"],
+    },
+    // ecosystem labels, merged (addLabels) on top of the top-level `dependencies` label.
+    // One rule per language label in the org-synced set; managers without a rule here
+    // (e.g. the Dockerfile custom managers) still get `dependencies`. Category matches
+    // cover every manager for that language (gomod+golang-version, maven+gradle,
+    // npm+nvm+…, pip+poetry+uv+…, terraform+terragrunt+…).
+    { matchManagers: ["github-actions"], addLabels: ["actions"] },
+    { matchManagers: ["git-submodules"], addLabels: ["submodule"] },
+    { matchManagers: ["mise"], addLabels: ["mise"] },
+    { matchCategories: ["dotnet"], addLabels: ["dotnet"] },
+    { matchCategories: ["golang"], addLabels: ["golang"] },
+    { matchCategories: ["java"], addLabels: ["java"] },
+    { matchCategories: ["js", "node"], addLabels: ["node"] },
+    { matchCategories: ["python"], addLabels: ["python"] },
+    { matchCategories: ["terraform"], addLabels: ["terraform"] },
+  ],
+}

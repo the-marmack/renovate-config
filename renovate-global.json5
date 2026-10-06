@@ -1,0 +1,52 @@
+// Copyright 2026 BitWise Media Group Ltd
+// SPDX-License-Identifier: MIT
+
+// Self-hosted (bot-side) global config, read only by the Renovate run in
+// .github/workflows/renovate.yaml. Repo-facing policy lives in default.json5; this file
+// holds the options that only make sense for the bot itself.
+{
+  // every repo inherits the shared preset; no per-repo onboarding file needed. The
+  // filename is explicit because Renovate only auto-discovers `default.json` for a bare
+  // github>owner/repo reference (deliberately, to avoid try/fail API calls — see
+  // renovate#36877); keeping JSON5 keeps the preset's comments.
+  extends: ["github>the-marmack/renovate-config:default.json5"],
+  onboarding: false,
+  requireConfig: "optional",
+  // App installation token → API-created, GitHub-verified commits, which is what satisfies
+  // the org's required_signatures ruleset. "auto" would detect this too; pinned explicitly
+  // because the signature guarantee is load-bearing.
+  platformCommit: "enabled",
+  // mise updates shell out to mise: the manager's artifact step regenerates
+  // mise.lock (`mise lock`) after an exact-pin bump, and the preset's transitional
+  // lockFileMaintenance runs `mise lock --bump` for repos still on "latest"
+  // selectors
+  allowedUnsafeExecutions: ["mise"],
+  // postUpgradeTasks allow-list — the execution boundary for repo-supplied commands;
+  // anchored exact matches, widen only deliberately. Two org patterns run through it:
+  //  - dist rebuild: JS action repos that commit their rollup bundle (ff-merge,
+  //    setup-evolve, …) declare a postUpgradeTasks rule in their own
+  //    .github/renovate.json5 to rebuild dist/ after npm bumps;
+  //  - terraform docs regen: the preset runs `mise run docs` in terraform-* module repos
+  //    after provider/module constraint bumps so the terraform-docs README blocks (which
+  //    embed the constraints, and whose lint check would otherwise go stale-red) are
+  //    refreshed in the same PR.
+  allowedCommands: [
+    "^npm ci --ignore-scripts$",
+    "^npm run build$",
+    "^mise run docs$",
+  ],
+  // TRANSITIONAL (goes with the preset's lockFileMaintenance): mise's own release
+  // cooldown for `mise lock --bump` selector resolution (3d, matching the preset's
+  // minimumReleaseAge). Exact pins resolve regardless of age, so this is inert for
+  // pin-bump artifact runs.
+  customEnvVariables: { MISE_MINIMUM_RELEASE_AGE: "3d" },
+  // mise.toml's task_config in consumer repos includes .mise/tasks/*.toml from the
+  // toolchain submodule; without the clone `mise lock` fails. The submodule's contents are
+  // excluded from dependency scanning by ignorePaths in the preset.
+  cloneSubmodules: true,
+  // Scope is bounded by the App INSTALLATION, not this filter (spike: github-workflows,
+  // toolchain + renovate-config; rollout: flip the installation to "All repositories" —
+  // no config change here).
+  autodiscover: true,
+  autodiscoverFilter: ["the-marmack/*"],
+}
