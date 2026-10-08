@@ -115,8 +115,8 @@ To opt a repo out entirely, uninstall the App from it (or set `{ enabled: false 
 1. Create the org-owned **"Renovate" GitHub App** (webhook off). Permissions: Checks RW, Commit statuses RW, Contents
    RW, Issues RW, Pull requests RW, Workflows RW, Administration R, Members R, Dependabot alerts R. Install it on the
    target repositories (the installation is the autodiscover scope).
-2. Set the org variable `RENOVATE_CLIENT_ID` and org secret `RENOVATE_PRIVATE_KEY` (all repositories — mirrors the
-   FF Merge pair).
+2. Set the org secrets `RENOVATE_CLIENT_ID` and `RENOVATE_PRIVATE_KEY`, shared with this repo only (the bot runs
+   here).
 3. In [`github-settings`](https://github.com/the-marmack/github-settings), add the App to the
    **pull-request** ruleset's bypass actors. Do **not** add it to the release-branch-security ruleset — its commits
    are Verified, so it never needs to bypass `required_signatures`.
